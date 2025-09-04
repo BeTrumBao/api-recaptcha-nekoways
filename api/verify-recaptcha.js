@@ -1,40 +1,59 @@
 // file: /api/verify-recaptcha.js
 const axios = require('axios');
 
-// Vercel sẽ bọc code này thành một serverless function
 module.exports = async (req, res) => {
-  // Chỉ chấp nhận yêu cầu POST
+  // Chỉ chấp nhận POST
   if (req.method !== 'POST') {
     return res.status(405).json({ message: 'Method Not Allowed' });
   }
 
   try {
-    // Lấy token từ body của request mà app Android gửi lên
-    const { recaptchaToken } = req.body;
-    
-    // Lấy Secret Key từ Environment Variables của Vercel để bảo mật
-    const secretKey = process.env.RECAPTCHA_SECRET_KEY; 
+    // Ưu tiên hcaptchaToken; chấp nhận recaptchaToken để tương thích ngược
+    const { hcaptchaToken, recaptchaToken } = req.body || {};
+    const token = hcaptchaToken || recaptchaToken;
 
-    if (!recaptchaToken) {
-      return res.status(400).json({ success: false, message: 'Thiếu reCAPTCHA token.' });
+    // Lấy Secret Key từ biến môi trường (đổi sang HCAPTCHA_SECRET_KEY)
+    const secretKey = process.env.HCAPTCHA_SECRET_KEY;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Thiếu hCaptcha token.' });
+    }
+    if (!secretKey) {
+      return res.status(500).json({ success: false, message: 'Thiếu HCAPTCHA_SECRET_KEY trong môi trường.' });
     }
 
-    // URL xác thực của Google
-    const verificationUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${secretKey}&response=${recaptchaToken}`;
-    
-    // Dùng axios để gọi API của Google
-    const response = await axios.post(verificationUrl);
+    // Lấy IP client (giúp chống lạm dụng; optional)
+    const remoteip = (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
 
-    // Trả kết quả về cho app Android
-    if (response.data.success) {
-      // Xác thực thành công
-      return res.status(200).json({ success: true });
+    // Gửi form-encoded tới hCaptcha
+    const form = new URLSearchParams();
+    form.append('secret', secretKey);
+    form.append('response', token);
+    if (remoteip) form.append('remoteip', remoteip);
+
+    const verifyResp = await axios.post('https://hcaptcha.com/siteverify', form.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 10000,
+    });
+
+    const data = verifyResp.data; // { success: boolean, challenge_ts, hostname|apk_package_name, 'error-codes'?: [] }
+
+    if (data.success) {
+      return res.status(200).json({
+        success: true,
+        challenge_ts: data.challenge_ts,
+        hostname: data.hostname,
+        apk_package_name: data.apk_package_name,
+      });
     } else {
-      // Xác thực thất bại
-      return res.status(400).json({ success: false, message: 'Token không hợp lệ.', errors: response.data['error-codes'] });
+      return res.status(400).json({
+        success: false,
+        message: 'Token không hợp lệ.',
+        errors: data['error-codes'] || [],
+      });
     }
   } catch (error) {
-    console.error('Lỗi server:', error);
+    console.error('Lỗi server:', error?.response?.data || error.message);
     return res.status(500).json({ success: false, message: 'Lỗi server nội bộ.' });
   }
 };
